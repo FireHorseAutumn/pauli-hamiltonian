@@ -1,12 +1,16 @@
 // GPU builder benchmark: CPU vectorized emit vs the GPU scatter kernels,
-// same ensembles as bench_build. Three timings per case: CPU vectorized
-// emit (wall), GPU kernels only (CUDA events, inputs resident), and GPU
-// end-to-end (wall: host-side string compaction, upload incl. allocations,
-// kernels, triplet download). Assembly is the shared CPU assemble() for all
-// paths and is excluded; it is identical work everywhere.
+// same ensembles as bench_build. Five timings per case: CPU vectorized
+// emit (wall), GPU emit kernels only (CUDA events, inputs resident), GPU
+// emit end-to-end (wall: host-side string compaction, upload incl.
+// allocations, kernels, triplet download), the full CPU build
+// (emit_vectorized + assemble, wall), and the full GPU build
+// (compaction, upload, emit kernels, on-device assembly, CSR download,
+// wall). The first three exclude assembly (identical work everywhere); the
+// last two include it and are the like-for-like full-build comparison.
 //
-// Correctness precondition: each case first checks build_gpu produces CSR
-// bitwise-identical to build_vectorized; a mismatch aborts the benchmark.
+// Correctness precondition: each case first checks build_gpu and
+// build_gpu_full produce CSR bitwise-identical to build_vectorized; a
+// mismatch aborts the benchmark.
 //
 // Absolute times vary with machine state; report medians and observed
 // spreads, raw per-rep timings preserved in the JSON.
@@ -127,6 +131,38 @@ Stats bench_gpu_e2e(const std::vector<ph::PauliString>& ss, int n, int reps) {
   return r;
 }
 
+// Full CPU build: vectorized emit + shared assemble (the stable sort is
+// the dominant cost at scale).
+Stats bench_cpu_full(const std::vector<ph::PauliString>& ss, int n,
+                     int reps) {
+  Stats r;
+  for (int i = 0; i < reps; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    ph::CsrMatrix m = ph::build_vectorized(ss, n);
+    const auto t1 = std::chrono::steady_clock::now();
+    (void)m;
+    r.reps.push_back(std::chrono::duration<double>(t1 - t0).count());
+  }
+  r.finish();
+  return r;
+}
+
+// Full GPU build end-to-end: compaction, allocations, upload, emit kernels,
+// on-device assembly, CSR download.
+Stats bench_gpu_full_e2e(const std::vector<ph::PauliString>& ss, int n,
+                         int reps) {
+  Stats r;
+  for (int i = 0; i < reps; ++i) {
+    const auto t0 = std::chrono::steady_clock::now();
+    ph::CsrMatrix m = ph::gpu::build_gpu_full(ss, n);
+    const auto t1 = std::chrono::steady_clock::now();
+    (void)m;
+    r.reps.push_back(std::chrono::duration<double>(t1 - t0).count());
+  }
+  r.finish();
+  return r;
+}
+
 std::vector<int> parse_list(const std::string& s) {
   std::vector<int> out;
   size_t pos = 0;
@@ -172,7 +208,7 @@ struct CaseEntry {
   const char* ensemble;
   int n, strings;
   std::uint64_t dim, nnz;
-  Stats cpu, gpu_kernel, gpu_e2e;
+  Stats cpu, gpu_kernel, gpu_e2e, cpu_full, gpu_full_e2e;
 };
 
 } // namespace
@@ -222,12 +258,11 @@ int main(int argc, char** argv) {
     std::printf("gpu: %s sm_%d%d, %d SMs, %zu MiB, driver %d, runtime %d\n",
                 prop.name, prop.major, prop.minor, prop.multiProcessorCount,
                 prop.totalGlobalMem >> 20, driver_v, runtime_v);
-    std::printf("median of %d reps; emit only (assembly is the shared CPU "
-                "path everywhere)\n\n",
-                reps);
-    std::printf("%10s %3s %6s %7s | %9s %9s %9s | %7s %7s\n", "ensemble", "n",
-                "dim", "strings", "cpu ms", "gpu ms", "e2e ms", "k speed",
-                "e2e speed");
+    std::printf("median of %d reps; emit-only columns exclude assembly, "
+                "full columns include it\n\n", reps);
+    std::printf("%10s %3s %6s %7s | %9s %9s %9s | %9s %9s | %7s\n", "ensemble",
+                "n", "dim", "strings", "cpu ms", "gpu ms", "e2e ms",
+                "cpufl ms", "gpufl ms", "full x");
 
     std::vector<CaseEntry> entries;
     for (const bool dh : {false, true})
@@ -237,7 +272,8 @@ int main(int argc, char** argv) {
               random_ensemble(seed + n * 7919 + S, n, S, dh);
           const ph::CsrMatrix a = ph::build_vectorized(ss, n);
           const ph::CsrMatrix g = ph::gpu::build_gpu(ss, n);
-          if (!ph::bitwise_equal(a, g))
+          const ph::CsrMatrix gf = ph::gpu::build_gpu_full(ss, n);
+          if (!ph::bitwise_equal(a, g) || !ph::bitwise_equal(a, gf))
             throw std::runtime_error("bitwise mismatch at n=" +
                                      std::to_string(n) + " strings=" +
                                      std::to_string(S));
@@ -249,19 +285,25 @@ int main(int argc, char** argv) {
                        a.nnz(),
                        bench_cpu_emit(ss, n, reps),
                        bench_gpu_kernel(e, reps),
-                       bench_gpu_e2e(ss, n, reps)};
+                       bench_gpu_e2e(ss, n, reps),
+                       bench_cpu_full(ss, n, reps),
+                       bench_gpu_full_e2e(ss, n, reps)};
           entries.push_back(ce);
           std::printf(
-              "%10s %3d %6" PRIu64 " %7d | %9.3f %9.3f %9.3f | %6.2fx %6.2fx\n",
+              "%10s %3d %6" PRIu64 " %7d | %9.3f %9.3f %9.3f | %9.3f %9.3f | "
+              "%6.2fx\n",
               ce.ensemble, n, ce.dim, S, ce.cpu.median * 1e3,
               ce.gpu_kernel.median * 1e3, ce.gpu_e2e.median * 1e3,
-              ce.cpu.median / ce.gpu_kernel.median,
-              ce.cpu.median / ce.gpu_e2e.median);
+              ce.cpu_full.median * 1e3, ce.gpu_full_e2e.median * 1e3,
+              ce.cpu_full.median / ce.gpu_full_e2e.median);
           std::printf("            spread ms [min,max]: cpu [%.3f,%.3f] gpu "
-                      "[%.3f,%.3f] e2e [%.3f,%.3f]\n",
+                      "[%.3f,%.3f] e2e [%.3f,%.3f] cpufull [%.3f,%.3f] "
+                      "gpufull [%.3f,%.3f]\n",
                       ce.cpu.min * 1e3, ce.cpu.max * 1e3,
                       ce.gpu_kernel.min * 1e3, ce.gpu_kernel.max * 1e3,
-                      ce.gpu_e2e.min * 1e3, ce.gpu_e2e.max * 1e3);
+                      ce.gpu_e2e.min * 1e3, ce.gpu_e2e.max * 1e3,
+                      ce.cpu_full.min * 1e3, ce.cpu_full.max * 1e3,
+                      ce.gpu_full_e2e.min * 1e3, ce.gpu_full_e2e.max * 1e3);
         }
 
     std::ofstream f(out_path);
@@ -285,10 +327,11 @@ int main(int argc, char** argv) {
       << "  \"build_type\": \"" << PH_BUILD_TYPE << "\",\n"
       << "  \"cxx_flags\": \"" << PH_CXX_FLAGS << "\",\n"
       << "  \"n_reps\": " << reps << ",\n"
-      << "  \"note\": \"emit only; assembly is the shared CPU assemble() "
-         "everywhere. gpu_kernel is CUDA-event timed with resident inputs; "
-         "gpu_e2e is wall clock including compaction, allocations, and "
-         "transfers.\",\n"
+      << "  \"note\": \"cpu/gpu_kernel/gpu_e2e are emit only (assembly "
+         "excluded, identical work everywhere); cpu_full = emit_vectorized "
+         "+ assemble wall clock, gpu_full_e2e = compaction + upload + emit "
+         "+ on-device assembly + CSR download wall clock. gpu_kernel is "
+         "CUDA-event timed with resident inputs.\",\n"
       << "  \"cases\": [\n";
     for (size_t i = 0; i < entries.size(); ++i) {
       const CaseEntry& e = entries[i];
@@ -296,13 +339,19 @@ int main(int argc, char** argv) {
         << ", \"dim\": " << e.dim << ", \"strings\": " << e.strings
         << ", \"nnz\": " << e.nnz << ", \"bitwise_equal\": true,\n"
         << "     \"kernel_speedup\": " << e.cpu.median / e.gpu_kernel.median
-        << ", \"e2e_speedup\": " << e.cpu.median / e.gpu_e2e.median << ",\n"
+        << ", \"e2e_speedup\": " << e.cpu.median / e.gpu_e2e.median
+        << ", \"full_speedup\": "
+        << e.cpu_full.median / e.gpu_full_e2e.median << ",\n"
         << "     \"cpu_vectorized\": ";
       json_stats(f, e.cpu, 16);
       f << ",\n     \"gpu_kernel\": ";
       json_stats(f, e.gpu_kernel, 16);
       f << ",\n     \"gpu_e2e\": ";
       json_stats(f, e.gpu_e2e, 16);
+      f << ",\n     \"cpu_full\": ";
+      json_stats(f, e.cpu_full, 16);
+      f << ",\n     \"gpu_full_e2e\": ";
+      json_stats(f, e.gpu_full_e2e, 16);
       f << "}" << (i + 1 < entries.size() ? "," : "") << "\n";
     }
     f << "  ]\n}\n";

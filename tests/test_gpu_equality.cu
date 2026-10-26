@@ -1,4 +1,5 @@
-// GPU gate: build_gpu must produce CSR bitwise-identical to both CPU
+// GPU gate: build_gpu (GPU emit + CPU assemble) and build_gpu_full (GPU
+// emit + GPU assemble) must produce CSR bitwise-identical to both CPU
 // builders across the shared case suite (tests/cases.hpp) — same row
 // pointers, same column order, memcmp-equal values. Every case also
 // requires bitwise Hermiticity of the GPU output, and the full suite is run
@@ -48,13 +49,18 @@ void run_case(const char* name, const std::vector<ph::PauliString>& strings,
   const ph::CsrMatrix a = ph::build_naive(strings, n);
   const ph::CsrMatrix b = ph::build_vectorized(strings, n);
   const ph::CsrMatrix g = ph::gpu::build_gpu(strings, n);
+  const ph::CsrMatrix gf = ph::gpu::build_gpu_full(strings, n);
   ++cases_run;
   strings_run += strings.size();
   nnz_run += b.nnz();
   check_pair(name, "gpu-vs-naive", a, g);
   check_pair(name, "gpu-vs-vectorized", b, g);
+  check_pair(name, "gpu-full-vs-naive", a, gf);
+  check_pair(name, "gpu-full-vs-vectorized", b, gf);
   if (!ph::is_hermitian_bitwise(g))
     fail(std::string(name) + ": gpu output not bitwise Hermitian");
+  if (!ph::is_hermitian_bitwise(gf))
+    fail(std::string(name) + ": gpu-full output not bitwise Hermitian");
 }
 
 } // namespace
@@ -72,7 +78,7 @@ int main() {
               " nnz=%" PRIu64 " failures=%d\n",
               cases_run, strings_run, nnz_run, failures);
   if (failures == 0)
-    std::printf("[pass] naive == vectorized == gpu bitwise on all cases, "
-                "deterministic across passes\n");
+    std::printf("[pass] naive == vectorized == gpu == gpu-full bitwise on "
+                "all cases, deterministic across passes\n");
   return failures ? 1 : 0;
 }
