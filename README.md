@@ -91,60 +91,61 @@ ctest --test-dir build --output-on-failure
 AMD Ryzen 9 8940HX (32 hw threads, single-threaded kernel), GCC 16.2.1,
 `-O3 -DNDEBUG`, median of 9 reps, full build = triplet generation + CSR
 assembly; raw per-rep timings and full metadata in
-[`data/pauli_build_bench.json`](data/pauli_build_bench.json).
+[`data/pauli_build_bench.json`](data/pauli_build_bench.json). All three
+tables below are from the governor-pinned idle-machine rerun of 2026-10-30
+(performance governor on all CPUs; bitwise gates passed per case before
+timing).
 
 End-to-end speedup, vectorized vs naive (strings/s and nnz/s in the JSON):
 
 | ensemble | n=8 | n=10 | n=12 | n=14 |
 |---|---|---|---|---|
-| random (uniform I/X/Y/Z) | 1.3–1.6x | 1.2–1.5x | 0.9–1.5x | 1.1–1.4x |
-| diag-heavy (half I/Z-only) | 2.6–4.2x | 3.0–3.4x | 3.0–3.5x | 2.3–4.1x |
+| random (uniform I/X/Y/Z) | 1.3–1.5x | 1.1–1.5x | 1.1–1.5x | 1.1–1.2x |
+| diag-heavy (half I/Z-only) | 2.5–4.2x | 3.2–3.4x | 3.3–3.5x | 2.3–4.3x |
 
-Ranges span string counts 64–1024. The generation kernel alone is 1.8–15.6x
+Ranges span string counts 64–1024. The generation kernel alone is 1.9–15.9x
 faster; end-to-end is dominated at scale by the deterministic sort/accumulate
-assembly, which is shared by both builders and is identical work. At
-n = 12 with 1024 random strings the vectorized total ran slower than naive
-(0.87x) with overlapping rep spreads — machine variance on a thermally
-throttled laptop CPU, not a systematic regression; the generation medians
-still favor vectorized 1.4x there. No extrapolation beyond the measured grid.
+assembly, which is shared by both builders and is identical work. The
+previously recorded n = 12 / 1024-string random loss cell (0.87x, unpinned)
+does not reproduce under the pinned governor (1.11x) — it was thermal
+machine variance, as suspected at the time. No extrapolation beyond the
+measured grid.
 
-GPU emit (2026-10-25, RTX 5060 Laptop sm_120, 26 SMs, nvcc 13.2.51 with
-g++-15 host; CPU side Ryzen 9 8940HX; median of 9 reps, emit only — assembly
-is the shared CPU sort everywhere; raw reps and metadata in
+GPU emit (pinned rerun 2026-10-30, RTX 5060 Laptop sm_120, 26 SMs, nvcc
+13.2.51 with g++-15 host; CPU side Ryzen 9 8940HX; median of 9 reps, emit
+only — assembly is the shared CPU sort everywhere; raw reps and metadata in
 [`data/pauli_gpu_build_bench.json`](data/pauli_gpu_build_bench.json);
 bitwise gate passed per case before timing):
 
 | ensemble | n=8 | n=10 | n=12 | n=14 |
 |---|---|---|---|---|
-| random, kernel vs CPU emit | 2.4–10.2x | 6.3–95.7x | 14.2–146.6x | 127.1–164.5x |
-| random, end-to-end vs CPU emit | 0.19–0.40x | 0.25–0.70x | 0.46–1.17x | 0.94–1.02x |
-| diag-heavy, kernel vs CPU emit | 1.2–3.8x | 4.8–41.9x | 11.3–78.5x | 94.0–136.6x |
-| diag-heavy, end-to-end vs CPU emit | 0.18–0.56x | 0.23–3.23x | 0.37–3.07x | 0.91–4.45x |
+| random, kernel vs CPU emit | 2.6–12.1x | 7.1–130.2x | 13.5–142.1x | 142.8–145.9x |
+| random, end-to-end vs CPU emit | 0.16–0.27x | 0.21–0.78x | 0.23–0.78x | 0.78–0.80x |
+| diag-heavy, kernel vs CPU emit | 1.7–4.1x | 6.4–65.3x | 16.4–116.6x | 129.5–135.6x |
+| diag-heavy, end-to-end vs CPU emit | 0.20–0.38x | 0.24–2.74x | 0.41–2.71x | 0.86–2.72x |
 
-Ranges span string counts 64–1024. The kernels win by up to ~165x with tight
-spreads (e.g. [1.890, 1.899] ms at the largest case) — the work is a
-perfectly parallel fixed-slot scatter. End-to-end, transfer + allocation
-dominates below n = 12 and the crossover only lands around n = 12–14
-(0.37–4.45x, several cells near or below 1x, some with wide e2e spreads from
-allocation variance — recorded, not hidden).
+Ranges span string counts 64–1024. The kernels win by up to ~146x with tight
+spreads — the work is a perfectly parallel fixed-slot scatter. End-to-end,
+transfer + allocation dominates below n = 12 and the crossover only lands
+around n = 12–14 (several cells near or below 1x — recorded, not hidden).
 
-Full build (2026-10-26, same protocol): CPU `emit_vectorized + assemble`
-vs the full GPU path (compaction, upload, emit, on-device assembly, CSR
-download), median-of-9 wall clock ratio:
+Full build (pinned rerun 2026-10-30, same protocol): CPU
+`emit_vectorized + assemble` vs the full GPU path (compaction, upload,
+emit, on-device assembly, CSR download), median-of-9 wall clock ratio:
 
 | ensemble | n=8 | n=10 | n=12 | n=14 |
 |---|---|---|---|---|
-| random | 2.2–11.3x | 2.6–17.6x | 2.4–7.0x | 5.4–11.0x |
-| diag-heavy | 1.0–5.8x | 2.2–9.2x | 2.6–7.7x | 2.7–5.8x |
+| random | 2.0–10.4x | 2.5–17.5x | 3.0–7.1x | 5.1–8.9x |
+| diag-heavy | 0.9–6.4x | 1.9–9.9x | 2.5–7.1x | 3.0–6.0x |
 
 Ranges span string counts 64–1024; the GPU assembly removes the CPU
 stable-sort bottleneck recorded above. One wash cell: diag-heavy n = 8
-with 64 strings at 0.98x with overlapping spreads — at 256×256 the whole
-build is sub-millisecond on both sides. Wide rep spreads on both sides at
-the largest sizes (CPU sort variance up to 3x, GPU allocation variance up
-to 2x on an unpinned laptop) — medians reported, raw reps in the JSON. The
-GPU assembly is bitwise-identical to the CPU assemble on every timed case
-(checked before timing) and bitwise deterministic run to run.
+with 64 strings at 0.94x with overlapping spreads — at 256×256 the whole
+build is sub-millisecond on both sides. Wide rep spreads persist at the
+largest sizes even pinned (GPU allocation variance) — medians reported,
+raw reps in the JSON. The GPU assembly is bitwise-identical to the CPU
+assemble on every timed case (checked before timing) and bitwise
+deterministic run to run.
 
 ## Status
 
